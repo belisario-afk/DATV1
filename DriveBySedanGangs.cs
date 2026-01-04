@@ -21,11 +21,13 @@ namespace Oxide.Plugins
 
         #region Data Types
 
+        private const string DefaultWeapon = "pistol.semiauto";
+
         private class GangVisuals
         {
             public List<string> Clothing;
             public Dictionary<string, ulong> Skins;
-            public string Weapon = "pistol.semiauto";
+            public string Weapon = DefaultWeapon;
             public ulong WeaponSkin = 0;
         }
 
@@ -134,7 +136,7 @@ namespace Oxide.Plugins
             public Dictionary<string, ulong> Skins { get; set; }
 
             [JsonProperty("Weapon")]
-            public string Weapon { get; set; } = "pistol.semiauto";
+            public string Weapon { get; set; } = DefaultWeapon;
 
             [JsonProperty("Weapon Skin")]
             public ulong WeaponSkin { get; set; } = 0;
@@ -308,7 +310,7 @@ namespace Oxide.Plugins
                 {
                     Clothing = data.Clothing,
                     Skins = data.Skins,
-                    Weapon = data.Weapon ?? "pistol.semiauto",
+                    Weapon = data.Weapon ?? DefaultWeapon,
                     WeaponSkin = data.WeaponSkin
                 };
             }
@@ -477,7 +479,8 @@ namespace Oxide.Plugins
             {
                 foreach (var itemShort in kit.Clothing)
                 {
-                    kit.Skins.TryGetValue(itemShort, out ulong skin);
+                    ulong skin = 0;
+                    kit.Skins?.TryGetValue(itemShort, out skin);
                     var item = ItemManager.CreateByName(itemShort, 1, skin);
                     if (item != null)
                         npc.inventory.GiveItem(item, npc.inventory.containerWear);
