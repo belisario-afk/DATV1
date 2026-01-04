@@ -1,22 +1,33 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.AI;
 
 namespace Oxide.Plugins
 {
-    [Info("DriveBySedanGangs", "belisario-afk + Gemini + Copilot", "2.5.0")]
+    [Info("DriveBySedanGangs", "belisario-afk + Gemini + Copilot", "3.0.0")]
     [Description("Spawn sedan gangs via command; sedans stalk players with 3 gang scientists that shoot from the car and on foot, then despawn when too far or dead.")]
     public class DriveBySedanGangs : RustPlugin
     {
+        #region Permissions
+        
+        private const string PermissionUse = "drivebysedan.use";
+        private const string PermissionAdmin = "drivebysedan.admin";
+        private const string PermissionNoCooldown = "drivebysedan.nocooldown";
+        
+        #endregion
+
         #region Data Types
+
+        private const string DefaultWeapon = "pistol.semiauto";
 
         private class GangVisuals
         {
             public List<string> Clothing;
             public Dictionary<string, ulong> Skins;
-            public string Weapon = "pistol.semiauto";
+            public string Weapon = DefaultWeapon;
             public ulong WeaponSkin = 0;
         }
 
@@ -27,6 +38,111 @@ namespace Oxide.Plugins
             public float LastShootTime;
             public int LastShooterIndex = -1;
         }
+
+        #endregion
+
+        #region Configuration
+
+        private class PluginConfig
+        {
+            [JsonProperty("Default Gang Name")]
+            public string DefaultGangName { get; set; } = "Westside Pirus";
+
+            [JsonProperty("Default Sedans Per Player")]
+            public int DefaultSedansPerPlayer { get; set; } = 1;
+
+            [JsonProperty("Max Sedans Per Player")]
+            public int MaxSedansPerPlayer { get; set; } = 5;
+
+            [JsonProperty("Scientists Per Sedan")]
+            public int ScientistsPerSedan { get; set; } = 3;
+
+            [JsonProperty("Spawn Radius")]
+            public float SpawnRadius { get; set; } = 35f;
+
+            [JsonProperty("Follow Update Interval (seconds)")]
+            public float FollowUpdateInterval { get; set; } = 0.1f;
+
+            [JsonProperty("Max Speed")]
+            public float MaxSpeed { get; set; } = 11f;
+
+            [JsonProperty("Acceleration")]
+            public float Acceleration { get; set; } = 45f;
+
+            [JsonProperty("Brake Force")]
+            public float BrakeForce { get; set; } = 50f;
+
+            [JsonProperty("Turn Torque")]
+            public float TurnTorque { get; set; } = 14f;
+
+            [JsonProperty("Max Steer Angle (degrees)")]
+            public float MaxSteerAngleDeg { get; set; } = 55f;
+
+            [JsonProperty("Min Distance To Player")]
+            public float MinDistanceToPlayer { get; set; } = 8f;
+
+            [JsonProperty("Max Distance Before Retire")]
+            public float TeleportDistance { get; set; } = 300f;
+
+            [JsonProperty("Attack Distance (deploy scientists)")]
+            public float AttackDistance { get; set; } = 18f;
+
+            [JsonProperty("Deploy Delay (seconds)")]
+            public float DeployDelaySeconds { get; set; } = 1f;
+
+            [JsonProperty("Scientist Health")]
+            public float ScientistHealth { get; set; } = 50f;
+
+            [JsonProperty("Scientist Move Speed")]
+            public float ScientistMoveSpeed { get; set; } = 4.5f;
+
+            [JsonProperty("Min Shoot Distance")]
+            public float MinShootDistance { get; set; } = 10f;
+
+            [JsonProperty("Max Shoot Distance")]
+            public float MaxShootDistance { get; set; } = 60f;
+
+            [JsonProperty("Shoot Interval (seconds)")]
+            public float ShootInterval { get; set; } = 0.4f;
+
+            [JsonProperty("Command Cooldown (seconds)")]
+            public float CommandCooldown { get; set; } = 30f;
+
+            [JsonProperty("Spawn Height Check")]
+            public float SpawnHeightCheck { get; set; } = 30f;
+
+            [JsonProperty("Spawn Above Ground")]
+            public float SpawnAboveGround { get; set; } = 1.0f;
+
+            [JsonProperty("Enable Random Gang Selection")]
+            public bool EnableRandomGang { get; set; } = false;
+
+            [JsonProperty("Debug Mode")]
+            public bool DebugMode { get; set; } = false;
+
+            [JsonProperty("Gang Visuals")]
+            public Dictionary<string, GangVisualsConfig> GangVisuals { get; set; }
+
+            [JsonProperty("Border Spawns")]
+            public Dictionary<string, string> BorderSpawns { get; set; }
+        }
+
+        private class GangVisualsConfig
+        {
+            [JsonProperty("Clothing")]
+            public List<string> Clothing { get; set; }
+
+            [JsonProperty("Skins")]
+            public Dictionary<string, ulong> Skins { get; set; }
+
+            [JsonProperty("Weapon")]
+            public string Weapon { get; set; } = DefaultWeapon;
+
+            [JsonProperty("Weapon Skin")]
+            public ulong WeaponSkin { get; set; } = 0;
+        }
+
+        private PluginConfig _config;
 
         #endregion
 
@@ -41,34 +157,11 @@ namespace Oxide.Plugins
 
         private readonly HashSet<ulong> _driveByNPCs = new HashSet<ulong>();
 
-        private const string DefaultGangName = "Westside Pirus";
-
         private const string SedanPrefab = "assets/content/vehicles/sedan_a/sedantest.entity.prefab";
-
-        private const int DefaultSedansPerPlayer = 1;
-        private const float SpawnRadius = 35f;
-        private const float FollowUpdateInterval = 0.1f;
-        private const float MaxSpeed = 11f;
-        private const float Acceleration = 45f;
-        private const float BrakeForce = 50f;
-        private const float TurnTorque = 14f;
-        private const float MaxSteerAngleDeg = 55f;
-        private const float MinDistanceToPlayer = 8f;
-        private const float TeleportDistance = 300f;    // if car > this, we retire it
-        private const float SpawnHeightCheck = 30f;
-        private const float SpawnAboveGround = 1.0f;
         private const int GroundLayerMask = -1;
 
-        private const float AttackDistance = 18f;       // car stops & deploys here
-        private const float DeployDelaySeconds = 1f;  // slight delay before deploy
-
-        private const float ScientistHealth = 50f;
-        private const float ScientistMoveSpeed = 4.5f;
-
-        // Manual drive-by shooting tuning
-        private const float MinShootDistance = 10f;
-        private const float MaxShootDistance = 60f;
-        private const float ShootInterval = 0.4f;
+        // Cooldown tracking
+        private readonly Dictionary<ulong, float> _playerCooldowns = new Dictionary<ulong, float>();
 
         // playerID -> list of sedans
         private readonly Dictionary<ulong, List<BaseEntity>> _playerSedans =
@@ -104,123 +197,196 @@ namespace Oxide.Plugins
 
         protected override void LoadDefaultConfig()
         {
-            Config["Visuals"] = new Dictionary<string, object>
+            _config = GetDefaultConfig();
+            SaveConfig();
+        }
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+            try
             {
-                ["Westside Pirus"] = new Dictionary<string, object>
+                _config = Config.ReadObject<PluginConfig>();
+                if (_config == null)
                 {
-                    ["Clothing"] = new List<string> { "hoodie", "pants", "mask.balaclava" },
-                    ["Skins"] = new Dictionary<string, object>
+                    LoadDefaultConfig();
+                    return;
+                }
+
+                // Ensure gang visuals exist
+                if (_config.GangVisuals == null || _config.GangVisuals.Count == 0)
+                {
+                    _config.GangVisuals = GetDefaultConfig().GangVisuals;
+                    _config.BorderSpawns = GetDefaultConfig().BorderSpawns;
+                    SaveConfig();
+                }
+            }
+            catch
+            {
+                PrintWarning("Configuration file is invalid; using defaults");
+                LoadDefaultConfig();
+            }
+        }
+
+        protected override void SaveConfig() => Config.WriteObject(_config);
+
+        private PluginConfig GetDefaultConfig()
+        {
+            return new PluginConfig
+            {
+                GangVisuals = new Dictionary<string, GangVisualsConfig>
+                {
+                    ["Westside Pirus"] = new GangVisualsConfig
                     {
-                        ["hoodie"] = 3637124708,
-                        ["pants"] = 3637161289,
-                        ["mask.balaclava"] = 3637136628
+                        Clothing = new List<string> { "hoodie", "pants", "mask.balaclava" },
+                        Skins = new Dictionary<string, ulong>
+                        {
+                            ["hoodie"] = 3637124708,
+                            ["pants"] = 3637161289,
+                            ["mask.balaclava"] = 3637136628
+                        },
+                        Weapon = "pistol.semiauto",
+                        WeaponSkin = 0
+                    },
+                    ["Northside Vagos"] = new GangVisualsConfig
+                    {
+                        Clothing = new List<string> { "hoodie", "pants", "mask.bandana" },
+                        Skins = new Dictionary<string, ulong>
+                        {
+                            ["hoodie"] = 3637132959,
+                            ["pants"] = 3637162032,
+                            ["mask.bandana"] = 3637144551
+                        },
+                        Weapon = "pistol.revolver",
+                        WeaponSkin = 0
+                    },
+                    ["Southside Sureños"] = new GangVisualsConfig
+                    {
+                        Clothing = new List<string> { "hoodie", "pants", "mask.balaclava" },
+                        Skins = new Dictionary<string, ulong>
+                        {
+                            ["hoodie"] = 3637133781,
+                            ["pants"] = 3637162360,
+                            ["mask.balaclava"] = 3637136303
+                        },
+                        Weapon = "smg.2",
+                        WeaponSkin = 0
+                    },
+                    ["Eastside Disciples"] = new GangVisualsConfig
+                    {
+                        Clothing = new List<string> { "hoodie", "pants", "mask.bandana" },
+                        Skins = new Dictionary<string, ulong>
+                        {
+                            ["hoodie"] = 3637126631,
+                            ["pants"] = 3637163268,
+                            ["mask.bandana"] = 3637149926
+                        },
+                        Weapon = "pistol.python",
+                        WeaponSkin = 0
                     }
                 },
-                ["Northside Vagos"] = new Dictionary<string, object>
+                BorderSpawns = new Dictionary<string, string>
                 {
-                    ["Clothing"] = new List<string> { "hoodie", "pants", "mask.bandana" },
-                    ["Skins"] = new Dictionary<string, object>
-                    {
-                        ["hoodie"] = 3637132959,
-                        ["pants"] = 3637162032,
-                        ["mask.bandana"] = 3637144551
-                    }
-                },
-                ["Southside Sureños"] = new Dictionary<string, object>
-                {
-                    ["Clothing"] = new List<string> { "hoodie", "pants", "mask.balaclava" },
-                    ["Skins"] = new Dictionary<string, object>
-                    {
-                        ["hoodie"] = 3637133781,
-                        ["pants"] = 3637162360,
-                        ["mask.balaclava"] = 3637136303
-                    }
-                },
-                ["Eastside Disciples"] = new Dictionary<string, object>
-                {
-                    ["Clothing"] = new List<string> { "hoodie", "pants", "mask.bandana" },
-                    ["Skins"] = new Dictionary<string, object>
-                    {
-                        ["hoodie"] = 3637126631,
-                        ["pants"] = 3637163268,
-                        ["mask.bandana"] = 3637149926
-                    }
+                    ["Westside Pirus"] = "west",
+                    ["Northside Vagos"] = "north",
+                    ["Southside Sureños"] = "south",
+                    ["Eastside Disciples"] = "east"
                 }
             };
-
-            Config["Border Spawns"] = new Dictionary<string, object>
-            {
-                ["Westside Pirus"] = "west",
-                ["Northside Vagos"] = "north",
-                ["Southside Sureños"] = "south",
-                ["Eastside Disciples"] = "east"
-            };
-
-            SaveConfig();
         }
 
         private void LoadGangConfig()
         {
             _gangKits.Clear();
 
-            var visualData = Config["Visuals"] as Dictionary<string, object>;
-            if (visualData != null)
+            if (_config?.GangVisuals == null) return;
+
+            foreach (var kvp in _config.GangVisuals)
             {
-                foreach (var kvp in visualData)
+                var data = kvp.Value;
+                if (data?.Clothing == null || data.Skins == null) continue;
+
+                _gangKits[kvp.Key] = new GangVisuals
                 {
-                    var data = kvp.Value as Dictionary<string, object>;
-                    if (data == null) continue;
-
-                    var clothingList = data["Clothing"] as List<object>;
-                    var skinDict = data["Skins"] as Dictionary<string, object>;
-
-                    if (clothingList == null || skinDict == null)
-                        continue;
-
-                    _gangKits[kvp.Key] = new GangVisuals
-                    {
-                        Clothing = clothingList.Select(x => x.ToString()).ToList(),
-                        Skins = skinDict.ToDictionary(
-                            x => x.Key,
-                            x => ulong.Parse(x.Value.ToString())
-                        )
-                    };
-                }
+                    Clothing = data.Clothing,
+                    Skins = data.Skins,
+                    Weapon = data.Weapon ?? DefaultWeapon,
+                    WeaponSkin = data.WeaponSkin
+                };
             }
 
             _borderSpawns.Clear();
-            var borderCfg = Config["Border Spawns"] as Dictionary<string, object>;
-            if (borderCfg != null)
+            if (_config?.BorderSpawns != null)
             {
-                foreach (var kvp in borderCfg)
-                    _borderSpawns[kvp.Key] = kvp.Value.ToString().ToLower();
+                foreach (var kvp in _config.BorderSpawns)
+                    _borderSpawns[kvp.Key] = kvp.Value.ToLower();
             }
+
+            LogDebug($"Loaded {_gangKits.Count} gang configurations");
         }
 
         #endregion
 
         #region Helpers
 
+        private void LogDebug(string message)
+        {
+            if (_config?.DebugMode == true)
+                Puts($"[DEBUG] {message}");
+        }
+
         private bool FindGroundPosition(Vector3 desired, out Vector3 groundPos)
         {
-            groundPos = desired + Vector3.up * SpawnAboveGround;
+            groundPos = desired + Vector3.up * _config.SpawnAboveGround;
 
-            Vector3 rayStart = desired + Vector3.up * SpawnHeightCheck;
-            RaycastHit hit;
+            Vector3 rayStart = desired + Vector3.up * _config.SpawnHeightCheck;
             if (Physics.Raycast(
                     rayStart,
                     Vector3.down,
-                    out hit,
-                    SpawnHeightCheck * 2f,
+                    out RaycastHit hit,
+                    _config.SpawnHeightCheck * 2f,
                     GroundLayerMask,
                     QueryTriggerInteraction.Ignore))
             {
-                groundPos = hit.point + Vector3.up * SpawnAboveGround;
+                groundPos = hit.point + Vector3.up * _config.SpawnAboveGround;
                 return true;
             }
 
             return false;
         }
+
+        private bool IsOnCooldown(BasePlayer player)
+        {
+            if (player == null) return true;
+            if (permission.UserHasPermission(player.UserIDString, PermissionNoCooldown)) return false;
+
+            if (_playerCooldowns.TryGetValue(player.userID, out float lastUse))
+            {
+                float elapsed = Time.realtimeSinceStartup - lastUse;
+                if (elapsed < _config.CommandCooldown)
+                {
+                    float remaining = _config.CommandCooldown - elapsed;
+                    player.ChatMessage($"<color=#ff6b6b>You must wait {remaining:F0} seconds before using this command again.</color>");
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void SetCooldown(BasePlayer player)
+        {
+            if (player == null) return;
+            _playerCooldowns[player.userID] = Time.realtimeSinceStartup;
+        }
+
+        private string GetRandomGang()
+        {
+            if (_gangKits.Count == 0) return _config.DefaultGangName;
+            var keys = _gangKits.Keys.ToList();
+            return keys[UnityEngine.Random.Range(0, keys.Count)];
+        }
+
+        private string GetGangName() => _config.EnableRandomGang ? GetRandomGang() : _config.DefaultGangName;
 
         /// <summary>
         /// Safely retire a sedan: stop plugin logic, dismount/kill NPCs, then call Kill() once.
@@ -284,14 +450,14 @@ namespace Oxide.Plugins
             var npcEntity = GameManager.server.CreateEntity(PrefabScientist, position, rotation);
             if (npcEntity == null)
             {
-                Puts("[DriveBySedanGangs] ERROR: Failed to create scientist entity.");
+                PrintError("Failed to create scientist entity.");
                 return null;
             }
 
             var npc = npcEntity as ScientistNPC;
             if (npc == null)
             {
-                Puts($"[DriveBySedanGangs] ERROR: Scientist cast failed. Entity type: {npcEntity?.GetType().Name ?? "NULL"}");
+                PrintError($"Scientist cast failed. Entity type: {npcEntity.GetType().Name}");
                 npcEntity.Kill();
                 return null;
             }
@@ -301,10 +467,11 @@ namespace Oxide.Plugins
             if (npc.net != null)
                 _driveByNPCs.Add(npc.net.ID.Value);
 
-            npc.InitializeHealth(ScientistHealth, ScientistHealth);
-            npc.startHealth = ScientistHealth;
-            npc.SetMaxHealth(ScientistHealth);
-            npc.SetHealth(ScientistHealth);
+            float health = _config.ScientistHealth;
+            npc.InitializeHealth(health, health);
+            npc.startHealth = health;
+            npc.SetMaxHealth(health);
+            npc.SetHealth(health);
 
             npc.inventory.Strip();
 
@@ -312,7 +479,8 @@ namespace Oxide.Plugins
             {
                 foreach (var itemShort in kit.Clothing)
                 {
-                    ulong skin = kit.Skins.ContainsKey(itemShort) ? kit.Skins[itemShort] : 0;
+                    ulong skin = 0;
+                    kit.Skins?.TryGetValue(itemShort, out skin);
                     var item = ItemManager.CreateByName(itemShort, 1, skin);
                     if (item != null)
                         npc.inventory.GiveItem(item, npc.inventory.containerWear);
@@ -350,6 +518,7 @@ namespace Oxide.Plugins
                 }
             }
 
+            LogDebug($"Created gang scientist for {gangName}");
             return npc;
         }
 
@@ -409,10 +578,20 @@ namespace Oxide.Plugins
 
         #region Lifecycle
 
+        private void Init()
+        {
+            // Register permissions
+            permission.RegisterPermission(PermissionUse, this);
+            permission.RegisterPermission(PermissionAdmin, this);
+            permission.RegisterPermission(PermissionNoCooldown, this);
+        }
+
         private void OnServerInitialized()
         {
             LoadGangConfig();
-            timer.Every(FollowUpdateInterval, UpdateAllSedans);
+            timer.Every(_config.FollowUpdateInterval, UpdateAllSedans);
+            
+            Puts($"DriveBySedanGangs v3.0.0 loaded with {_gangKits.Count} gang configurations.");
         }
 
         private void Unload()
@@ -449,6 +628,7 @@ namespace Oxide.Plugins
             _driveByStates.Clear();
             _retiringSedans.Clear();
             _scientistSeats.Clear();
+            _playerCooldowns.Clear();
         }
 
         #endregion
@@ -564,16 +744,16 @@ namespace Oxide.Plugins
             float rad = angle * Mathf.Deg2Rad;
 
             Vector3 offset = new Vector3(
-                Mathf.Cos(rad) * SpawnRadius,
+                Mathf.Cos(rad) * _config.SpawnRadius,
                 0f,
-                Mathf.Sin(rad) * SpawnRadius
+                Mathf.Sin(rad) * _config.SpawnRadius
             );
 
             Vector3 samplePos = playerPos + offset;
 
             if (!FindGroundPosition(samplePos, out var finalPos))
             {
-                PrintWarning($"[DriveBySedanGangs] Failed to find ground for sedan spawn near {player.displayName}.");
+                PrintWarning($"Failed to find ground for sedan spawn near {player.displayName}.");
                 return null;
             }
 
@@ -609,7 +789,10 @@ namespace Oxide.Plugins
             _deployScheduled.Remove(car);
             _retiringSedans.Remove(car);
 
-            SeatGangScientistsInSedan(car, DefaultGangName, player);
+            string gangName = GetGangName();
+            SeatGangScientistsInSedan(car, gangName, player);
+            
+            LogDebug($"Spawned sedan for {player.displayName} with gang {gangName}");
 
             return car;
         }
@@ -621,11 +804,11 @@ namespace Oxide.Plugins
             var seats = car.GetComponentsInChildren<BaseMountable>(true);
             if (seats == null || seats.Length == 0)
             {
-                Puts("[DriveBySedanGangs] No seats (BaseMountable) found on sedan; cannot seat scientists.");
+                PrintWarning("No seats (BaseMountable) found on sedan; cannot seat scientists.");
                 return;
             }
 
-            int needed = 3;
+            int needed = _config.ScientistsPerSedan;
             var seated = new List<ScientistNPC>();
 
             foreach (var seat in seats)
@@ -646,11 +829,8 @@ namespace Oxide.Plugins
 
                 if (npc.Brain != null && target != null)
                 {
-                    if (npc.Brain.Senses?.Memory != null)
-                        npc.Brain.Senses.Memory.SetKnown(target, npc, npc.Brain.Senses);
-
-                    if (npc.Brain.Events?.Memory?.Entity != null)
-                        npc.Brain.Events.Memory.Entity.Set(target, 0);
+                    npc.Brain.Senses?.Memory?.SetKnown(target, npc, npc.Brain.Senses);
+                    npc.Brain.Events?.Memory?.Entity?.Set(target, 0);
                 }
 
                 seated.Add(npc);
@@ -668,6 +848,8 @@ namespace Oxide.Plugins
                     LastShootTime = 0f,
                     LastShooterIndex = -1
                 };
+                
+                LogDebug($"Seated {seated.Count} scientists in sedan for target {target.displayName}");
             }
         }
 
@@ -817,7 +999,7 @@ namespace Oxide.Plugins
             if (car == null || car.IsDestroyed) return;
             if (_retiringSedans.Contains(car)) return;
 
-            if (Time.realtimeSinceStartup - ev.LastShootTime < ShootInterval) return;
+            if (Time.realtimeSinceStartup - ev.LastShootTime < _config.ShootInterval) return;
 
             BasePlayer target = BasePlayer.FindByID(ev.TargetID);
             if (target == null || !target.IsAlive()) return;
@@ -827,8 +1009,7 @@ namespace Oxide.Plugins
             {
                 var npc = ev.Shooters[i];
                 if (npc == null || npc.IsDestroyed) continue;
-                // Still skip index 0 as "driver" when mounted,
-                // but on foot it doesn't hurt – can adjust if needed.
+                // Skip index 0 as "driver" when mounted
                 if (i == 0 && npc.isMounted) continue;
                 validShooters.Add(npc);
             }
@@ -839,7 +1020,7 @@ namespace Oxide.Plugins
             if (shooter == null || shooter.IsDestroyed) return;
 
             float distToTarget = Vector3.Distance(shooter.transform.position, target.transform.position);
-            if (distToTarget < MinShootDistance || distToTarget > MaxShootDistance) return;
+            if (distToTarget < _config.MinShootDistance || distToTarget > _config.MaxShootDistance) return;
 
             Vector3 npcEyes = shooter.eyes?.position ?? (shooter.transform.position + Vector3.up * 1.5f);
             Vector3 targetPos = target.transform.position + Vector3.up * 1.2f;
@@ -880,7 +1061,7 @@ namespace Oxide.Plugins
                 rb.isKinematic = true;
             }
 
-            timer.Once(DeployDelaySeconds, () =>
+            timer.Once(_config.DeployDelaySeconds, () =>
             {
                 if (car == null || car.IsDestroyed) return;
                 if (_retiringSedans.Contains(car)) return;
@@ -897,6 +1078,7 @@ namespace Oxide.Plugins
             if (_deployedSedans.Contains(car)) return;
 
             _deployedSedans.Add(car);
+            LogDebug($"Deploying scientists from sedan for target {target.displayName}");
 
             if (!_sedanScientists.TryGetValue(car, out var sciList) || sciList == null || sciList.Count == 0)
                 return;
@@ -907,16 +1089,14 @@ namespace Oxide.Plugins
 
                 if (sci.isMounted)
                 {
-                    BaseMountable seat;
-                    if (_scientistSeats.TryGetValue(sci, out seat) && seat != null && !seat.IsDestroyed)
+                    if (_scientistSeats.TryGetValue(sci, out BaseMountable seat) && seat != null && !seat.IsDestroyed)
                     {
                         seat.DismountAllPlayers();
                     }
                     else
                     {
                         var mountable = sci.GetMounted() as BaseMountable;
-                        if (mountable != null && !mountable.IsDestroyed)
-                            mountable.DismountAllPlayers();
+                        mountable?.DismountAllPlayers();
                     }
                 }
 
@@ -927,7 +1107,7 @@ namespace Oxide.Plugins
                 {
                     agent.enabled = true;
                     agent.stoppingDistance = 5f;
-                    agent.speed = ScientistMoveSpeed;
+                    agent.speed = _config.ScientistMoveSpeed;
                     agent.acceleration = 8f;
                     agent.autoBraking = true;
                 }
@@ -944,11 +1124,8 @@ namespace Oxide.Plugins
                         sci.Brain.Navigator.SetDestination(target.transform.position, BaseNavigator.NavigationSpeed.Normal);
                     }
 
-                    if (sci.Brain.Senses?.Memory != null)
-                        sci.Brain.Senses.Memory.SetKnown(target, sci, sci.Brain.Senses);
-
-                    if (sci.Brain.Events?.Memory?.Entity != null)
-                        sci.Brain.Events.Memory.Entity.Set(target, 0);
+                    sci.Brain.Senses?.Memory?.SetKnown(target, sci, sci.Brain.Senses);
+                    sci.Brain.Events?.Memory?.Entity?.Set(target, 0);
                 }
 
                 sci.SetPlayerFlag(BasePlayer.PlayerFlags.Relaxed, false);
@@ -970,15 +1147,16 @@ namespace Oxide.Plugins
 
             float distance = toPlayer.magnitude;
 
-            if (distance <= AttackDistance)
+            if (distance <= _config.AttackDistance)
             {
                 ScheduleDeploy(car, player);
                 return;
             }
 
-            // If sedan falls too far behind, retire it (no teleport)
-            if (distance > TeleportDistance)
+            // If sedan falls too far behind, retire it
+            if (distance > _config.TeleportDistance)
             {
+                LogDebug($"Retiring sedan - too far from player ({distance:F0}m)");
                 RetireSedan(car);
                 return;
             }
@@ -1005,20 +1183,20 @@ namespace Oxide.Plugins
 
             float angleToTarget = Vector3.SignedAngle(forward, flatToPlayer, Vector3.up);
             float steerSign = Mathf.Sign(angleToTarget);
-            float steerAmount = Mathf.Clamp(Math.Abs(angleToTarget) / MaxSteerAngleDeg, 0f, 1f) * steerSign;
+            float steerAmount = Mathf.Clamp(Math.Abs(angleToTarget) / _config.MaxSteerAngleDeg, 0f, 1f) * steerSign;
 
             var rbMove = car.GetComponent<Rigidbody>();
             if (rbMove != null)
             {
-                rbMove.AddTorque(0f, steerAmount * TurnTorque, 0f, ForceMode.Acceleration);
+                rbMove.AddTorque(0f, steerAmount * _config.TurnTorque, 0f, ForceMode.Acceleration);
             }
 
-            float desiredSpeed = MaxSpeed;
+            float desiredSpeed = _config.MaxSpeed;
 
-            if (distance < MinDistanceToPlayer)
+            if (distance < _config.MinDistanceToPlayer)
             {
-                float t = Mathf.InverseLerp(0f, MinDistanceToPlayer, distance);
-                desiredSpeed = Mathf.Lerp(MaxSpeed * 0.1f, MaxSpeed * 0.7f, t);
+                float t = Mathf.InverseLerp(0f, _config.MinDistanceToPlayer, distance);
+                desiredSpeed = Mathf.Lerp(_config.MaxSpeed * 0.1f, _config.MaxSpeed * 0.7f, t);
             }
 
             forward = car.transform.forward;
@@ -1034,14 +1212,14 @@ namespace Oxide.Plugins
 
                 if (currentSpeed < desiredSpeed)
                 {
-                    rbMove.AddForce(forward * Acceleration, ForceMode.Acceleration);
+                    rbMove.AddForce(forward * _config.Acceleration, ForceMode.Acceleration);
                 }
                 else
                 {
                     if (flatVel.sqrMagnitude > 0.01f)
                     {
                         Vector3 brakeDir = -flatVel.normalized;
-                        rbMove.AddForce(brakeDir * BrakeForce, ForceMode.Acceleration);
+                        rbMove.AddForce(brakeDir * _config.BrakeForce, ForceMode.Acceleration);
                     }
                 }
 
@@ -1049,7 +1227,7 @@ namespace Oxide.Plugins
             }
             else
             {
-                car.transform.position += forward * desiredSpeed * FollowUpdateInterval;
+                car.transform.position += forward * desiredSpeed * _config.FollowUpdateInterval;
             }
 
             car.SendNetworkUpdate();
@@ -1062,23 +1240,284 @@ namespace Oxide.Plugins
         [ChatCommand("stalksedan")]
         private void CmdStalkSedan(BasePlayer player, string command, string[] args)
         {
-            int count = DefaultSedansPerPlayer;
-            if (args != null && args.Length > 0)
+            if (!permission.UserHasPermission(player.UserIDString, PermissionUse))
             {
-                int.TryParse(args[0], out count);
-                if (count <= 0)
-                    count = DefaultSedansPerPlayer;
+                player.ChatMessage("<color=#ff6b6b>You don't have permission to use this command.</color>");
+                return;
             }
 
+            if (IsOnCooldown(player))
+                return;
+
+            int count = _config.DefaultSedansPerPlayer;
+            if (args != null && args.Length > 0)
+            {
+                if (int.TryParse(args[0], out int parsed) && parsed > 0)
+                    count = parsed;
+            }
+
+            // Enforce max sedans limit
+            count = Mathf.Min(count, _config.MaxSedansPerPlayer);
+
+            SetCooldown(player);
             EnsureGangForPlayer(player, count);
-            player.ChatMessage($"Your drive-by sedan gang is now size {count}.");
+            player.ChatMessage($"<color=#4ecdc4>Your drive-by sedan gang ({count} sedan{(count > 1 ? "s" : "")}) is on the way!</color>");
         }
 
         [ChatCommand("destroysedan")]
         private void CmdDestroySedan(BasePlayer player, string command, string[] args)
         {
+            if (!permission.UserHasPermission(player.UserIDString, PermissionUse))
+            {
+                player.ChatMessage("<color=#ff6b6b>You don't have permission to use this command.</color>");
+                return;
+            }
+
+            if (!_playerSedans.ContainsKey(player.userID) || _playerSedans[player.userID].Count == 0)
+            {
+                player.ChatMessage("<color=#ff6b6b>You don't have any active sedan gangs.</color>");
+                return;
+            }
+
             DestroyGangForPlayer(player);
-            player.ChatMessage("Your drive-by sedan gang has been destroyed.");
+            player.ChatMessage("<color=#4ecdc4>Your drive-by sedan gang has been destroyed.</color>");
+        }
+
+        [ChatCommand("sedanstatus")]
+        private void CmdSedanStatus(BasePlayer player, string command, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, PermissionUse))
+            {
+                player.ChatMessage("<color=#ff6b6b>You don't have permission to use this command.</color>");
+                return;
+            }
+
+            if (!_playerSedans.TryGetValue(player.userID, out var sedans) || sedans == null || sedans.Count == 0)
+            {
+                player.ChatMessage("<color=#ff9f43>No active sedan gangs.</color>");
+                return;
+            }
+
+            int totalScientists = 0;
+            foreach (var car in sedans)
+            {
+                if (car != null && _sedanScientists.TryGetValue(car, out var sciList) && sciList != null)
+                    totalScientists += sciList.Count(s => s != null && !s.IsDestroyed);
+            }
+
+            player.ChatMessage($"<color=#4ecdc4>Active sedan gangs: {sedans.Count}</color>");
+            player.ChatMessage($"<color=#4ecdc4>Total gang members: {totalScientists}</color>");
+        }
+
+        #endregion
+
+        #region Console Commands
+
+        [ConsoleCommand("driveby.spawn")]
+        private void ConsoleCmdSpawn(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null)
+            {
+                // Server console or admin executing
+                if (!arg.IsAdmin)
+                {
+                    arg.ReplyWith("You must be an admin to use this command from console.");
+                    return;
+                }
+
+                if (arg.Args == null || arg.Args.Length < 1)
+                {
+                    arg.ReplyWith("Usage: driveby.spawn <playerNameOrId> [count]");
+                    return;
+                }
+
+                var target = FindPlayer(arg.Args[0]);
+                if (target == null)
+                {
+                    arg.ReplyWith($"Player '{arg.Args[0]}' not found.");
+                    return;
+                }
+
+                int count = _config.DefaultSedansPerPlayer;
+                if (arg.Args.Length > 1 && int.TryParse(arg.Args[1], out int parsed) && parsed > 0)
+                    count = Mathf.Min(parsed, _config.MaxSedansPerPlayer);
+
+                EnsureGangForPlayer(target, count);
+                arg.ReplyWith($"Spawned {count} sedan gang(s) for {target.displayName}.");
+                return;
+            }
+
+            // Player executing
+            if (!permission.UserHasPermission(player.UserIDString, PermissionAdmin))
+            {
+                arg.ReplyWith("You don't have permission to use this command.");
+                return;
+            }
+
+            if (arg.Args == null || arg.Args.Length < 1)
+            {
+                // Spawn for self
+                int selfCount = _config.DefaultSedansPerPlayer;
+                if (arg.Args != null && arg.Args.Length > 0 && int.TryParse(arg.Args[0], out int selfParsed))
+                    selfCount = Mathf.Min(selfParsed, _config.MaxSedansPerPlayer);
+
+                EnsureGangForPlayer(player, selfCount);
+                arg.ReplyWith($"Spawned {selfCount} sedan gang(s) for yourself.");
+                return;
+            }
+
+            var targetPlayer = FindPlayer(arg.Args[0]);
+            if (targetPlayer == null)
+            {
+                arg.ReplyWith($"Player '{arg.Args[0]}' not found.");
+                return;
+            }
+
+            int targetCount = _config.DefaultSedansPerPlayer;
+            if (arg.Args.Length > 1 && int.TryParse(arg.Args[1], out int targetParsed) && targetParsed > 0)
+                targetCount = Mathf.Min(targetParsed, _config.MaxSedansPerPlayer);
+
+            EnsureGangForPlayer(targetPlayer, targetCount);
+            arg.ReplyWith($"Spawned {targetCount} sedan gang(s) for {targetPlayer.displayName}.");
+        }
+
+        [ConsoleCommand("driveby.destroy")]
+        private void ConsoleCmdDestroy(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null)
+            {
+                if (!arg.IsAdmin)
+                {
+                    arg.ReplyWith("You must be an admin to use this command from console.");
+                    return;
+                }
+
+                if (arg.Args == null || arg.Args.Length < 1)
+                {
+                    arg.ReplyWith("Usage: driveby.destroy <playerNameOrId|all>");
+                    return;
+                }
+
+                if (arg.Args[0].ToLower() == "all")
+                {
+                    int count = _playerSedans.Count;
+                    foreach (var playerId in _playerSedans.Keys.ToArray())
+                    {
+                        var targetPlayer = BasePlayer.FindByID(playerId);
+                        if (targetPlayer != null)
+                            DestroyGangForPlayer(targetPlayer);
+                    }
+                    arg.ReplyWith($"Destroyed all sedan gangs ({count} players affected).");
+                    return;
+                }
+
+                var target = FindPlayer(arg.Args[0]);
+                if (target == null)
+                {
+                    arg.ReplyWith($"Player '{arg.Args[0]}' not found.");
+                    return;
+                }
+
+                DestroyGangForPlayer(target);
+                arg.ReplyWith($"Destroyed sedan gang for {target.displayName}.");
+                return;
+            }
+
+            if (!permission.UserHasPermission(player.UserIDString, PermissionAdmin))
+            {
+                arg.ReplyWith("You don't have permission to use this command.");
+                return;
+            }
+
+            if (arg.Args == null || arg.Args.Length < 1)
+            {
+                DestroyGangForPlayer(player);
+                arg.ReplyWith("Destroyed your sedan gang.");
+                return;
+            }
+
+            if (arg.Args[0].ToLower() == "all")
+            {
+                int count = _playerSedans.Count;
+                foreach (var playerId in _playerSedans.Keys.ToArray())
+                {
+                    var targetPlayer = BasePlayer.FindByID(playerId);
+                    if (targetPlayer != null)
+                        DestroyGangForPlayer(targetPlayer);
+                }
+                arg.ReplyWith($"Destroyed all sedan gangs ({count} players affected).");
+                return;
+            }
+
+            var targetPlayerForDestroy = FindPlayer(arg.Args[0]);
+            if (targetPlayerForDestroy == null)
+            {
+                arg.ReplyWith($"Player '{arg.Args[0]}' not found.");
+                return;
+            }
+
+            DestroyGangForPlayer(targetPlayerForDestroy);
+            arg.ReplyWith($"Destroyed sedan gang for {targetPlayerForDestroy.displayName}.");
+        }
+
+        [ConsoleCommand("driveby.list")]
+        private void ConsoleCmdList(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player != null && !permission.UserHasPermission(player.UserIDString, PermissionAdmin))
+            {
+                arg.ReplyWith("You don't have permission to use this command.");
+                return;
+            }
+
+            if (!arg.IsAdmin && player == null)
+            {
+                arg.ReplyWith("You must be an admin to use this command.");
+                return;
+            }
+
+            if (_playerSedans.Count == 0)
+            {
+                arg.ReplyWith("No active sedan gangs.");
+                return;
+            }
+
+            var response = $"Active sedan gangs ({_playerSedans.Count}):\n";
+            foreach (var kvp in _playerSedans)
+            {
+                var targetPlayer = BasePlayer.FindByID(kvp.Key);
+                string playerName = targetPlayer?.displayName ?? kvp.Key.ToString();
+                int sedanCount = kvp.Value?.Count(c => c != null && !c.IsDestroyed) ?? 0;
+                int scientistCount = 0;
+
+                foreach (var car in kvp.Value)
+                {
+                    if (car != null && _sedanScientists.TryGetValue(car, out var sciList) && sciList != null)
+                        scientistCount += sciList.Count(s => s != null && !s.IsDestroyed);
+                }
+
+                response += $"  {playerName}: {sedanCount} sedan(s), {scientistCount} scientist(s)\n";
+            }
+
+            arg.ReplyWith(response);
+        }
+
+        private BasePlayer FindPlayer(string nameOrId)
+        {
+            if (ulong.TryParse(nameOrId, out ulong userId))
+            {
+                return BasePlayer.FindByID(userId) ?? BasePlayer.FindSleeping(userId);
+            }
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player.displayName.IndexOf(nameOrId, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return player;
+            }
+
+            return null;
         }
 
         #endregion
